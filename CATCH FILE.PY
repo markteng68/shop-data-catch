@@ -1,84 +1,72 @@
 import asyncio
 from pyppeteer import launch
 import os
-import random
 
-async def scrape_page(page_number, seen_links):
-    """
-    每次抓取一页后，关闭浏览器，避免 Cloudflare 触发反爬虫。
-    """
-    browser = await launch(headless=False, args=['--no-sandbox', '--disable-setuid-sandbox'], executablePath='C:/Program Files/Google/Chrome/Application/chrome.exe')
+# **基本设置**
+BASE_URL = "https://www.alkemillacosmetici.it/en/"
+CATEGORY_URLS = [
+    "15-hair",
+    "11-body",
+    "5-face",
+    "17-makeup",
+    "104-men",
+    "9-baby",
+    "13-sun-care"
+]
+
+SAVE_PATH = r'C:\Users\mark0\Desktop\program\hello\alkemillacosmetici.it'
+os.makedirs(SAVE_PATH, exist_ok=True)
+
+PRODUCT_FILE = os.path.join(SAVE_PATH, 'product_links.txt')
+
+async def fetch_product_links():
+    browser = await launch(
+        headless=False,
+        args=['--no-sandbox', '--disable-setuid-sandbox'],
+        executablePath='C:/Program Files/Google/Chrome/Application/chrome.exe'
+    )
     page = await browser.newPage()
+    await page.setViewport({"width": 1280, "height": 800})  # 模拟正常窗口
 
-    # 设置 User-Agent，防止 Cloudflare 检测
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    all_product_links = set()
 
-    # 伪装为真实用户
-    await page.evaluateOnNewDocument('''() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        window.navigator.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    }''')
+    for category in CATEGORY_URLS:
+        page_number = 1  # 每个分类的分页
+        while True:
+            category_url = f"{BASE_URL}{category}?page={page_number}"
+            print(f"📌 抓取分类页面: {category_url}")
+            await page.goto(category_url, {"waitUntil": "domcontentloaded"})  # 页面加载
 
-    # **构造正确的 URL**
-    if page_number == 1:
-        url = 'https://www.notino.it/brand-cosmetici-italiani/'
-    else:
-        url = f'https://www.notino.it/brand-cosmetici-italiani/?f={page_number}-1-2-62760'
+            # **检查是否有产品**
+            try:
+                await page.waitForSelector("a.product-title", {"timeout": 5000})
+            except:
+                print(f"⚠️ 第 {page_number} 页没有产品，停止爬取 {category} 分类。")
+                break
 
-    print(f"📄 正在抓取第 {page_number} 页：{url}")
+            # **抓取产品链接**
+            product_links = await page.evaluate("""() => {
+                return Array.from(document.querySelectorAll("a.product-title"))
+                    .map(el => el.getAttribute("href"));
+            }""")
 
-    await page.goto(url, {'timeout': 60000, 'waitUntil': 'domcontentloaded'})
+            # **补全网址**
+            full_links = {link for link in product_links if link}
 
-    # **模拟滚动加载更多产品**
-    for _ in range(5):
-        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-        await asyncio.sleep(random.uniform(3, 5))  # **每次滚动等待 3-5 秒**
+            # **检测是否有新链接**
+            if not full_links - all_product_links:
+                print(f"✅ 第 {page_number} 页没有新的链接，结束 {category} 分类的爬取。")
+                break
 
-    # **提取产品链接**
-    links = await page.evaluate('''() => {
-        return Array.from(document.querySelectorAll('div[data-testid="product-container"] a'))
-            .map(link => link.href);
-    }''')
+            all_product_links.update(full_links)
+            page_number += 1  # 进入下一页
 
-    # **仅保留唯一的链接**
-    unique_links = [link for link in links if link not in seen_links]
-    seen_links.update(unique_links)  # **更新已抓取的链接集合**
+    # **写入 product_links.txt**
+    with open(PRODUCT_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(all_product_links)))
 
-    print(f"🔗 第 {page_number} 页找到 {len(links)} 个产品链接，其中 {len(unique_links)} 个是新的")
+    print(f"✅ 抓取完成，共获取 {len(all_product_links)} 个产品链接，已保存到 {PRODUCT_FILE}")
+    await browser.close()
 
-    await browser.close()  # **每次抓取完后关闭浏览器**
-    return unique_links
-
-async def main():
-    total_pages = 44
-    seen_links = set()  # **存储已抓取的链接**
-    save_path = r'C:\Users\mark0\Desktop\program\hello'
-    os.makedirs(save_path, exist_ok=True)
-    file_path = os.path.join(save_path, 'product_links.txt')
-
-    # **确保文件为空**
-    open(file_path, 'w', encoding='utf-8').close()
-
-    for page_number in range(1, total_pages + 1):
-        try:
-            unique_links = await scrape_page(page_number, seen_links)
-
-            # **随机延迟，防止 Cloudflare 进一步识别**
-            wait_time = random.uniform(10, 15)
-            print(f"⏳ 随机等待 {wait_time:.2f} 秒，模拟人类行为...")
-            await asyncio.sleep(wait_time)
-
-            # **追加写入（不会写入重复的链接）**
-            with open(file_path, 'a', encoding='utf-8') as file:
-                for link in unique_links:
-                    file.write(link + '\n')
-
-        except Exception as e:
-            print(f"❌ 抓取第 {page_number} 页失败: {e}")
-
-    print(f"✅ 抓取完成，所有唯一链接已保存到 {file_path}")
-
-# 运行脚本
-asyncio.get_event_loop().run_until_complete(main())
+# **执行爬虫**
+asyncio.run(fetch_product_links())
